@@ -8,82 +8,139 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+
+    # -------------------------
+    # Edit these defaults
+    # -------------------------
     env:
+      # Source playlist that rotates every ~5 min
       PLAYLIST_URL: "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u"
+
+      # Exact title to prefer (hard match first)
       WANTED_TITLE: "title=\"sonyliv-Cricket\", Pakistan vs Bangladesh - Super Four - 25 Sep 2025 [HIN] - Asia Cup 2025"
+
+      # Soft fallback needles (all must be present on the tag line if exact not found)
       NEEDLES: "sonyliv-Cricket|Pakistan vs Bangladesh|Super Four|25 Sep 2025|Asia Cup 2025|[HIN]"
-      SOURCE_URL: "https://yourdomain.com/sonyliv"
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
-      CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}
-      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}
+
+      # TODO: replace with the fixed URL your app already hits (must be proxied via Cloudflare)
+      SOURCE_URL: "https://smartrupeeguide.com/sonyliv"
+
+      # ---- CF IDs are read from repo secrets ----
+      # CF_API_TOKEN   -> GitHub repo secret
+      # CF_ACCOUNT_ID  -> GitHub repo secret
+      # CF_LIST_ID     -> GitHub repo secret
+      # (Optional) CF_ZONE_ID -> GitHub repo secret (only used if you want to purge cache)
+
     steps:
       - name: Fetch playlist
         run: |
+          set -e
           curl -fsSL "$PLAYLIST_URL" -o playlist.m3u
 
-      - name: Extract target m3u8
+      - name: Extract target .m3u8
         id: parse
         run: |
           set -e
+          # 1) Try exact title match first.
           awk -v T="$WANTED_TITLE" '
-            BEGIN{f=0}
+            BEGIN{found=0}
             {
-              if (index(tolower($0), tolower(T))>0) {f=1; next}
-              if (f==1 && $0 !~ /^#/ && $0 ~ /^https?:\/\//) {print $0; exit 0}
+              line=$0
+              if (index(tolower(line), tolower(T))>0) {found=1; next}
+              if (found==1 && line !~ /^#/ && line ~ /^https?:\/\//) {
+                print line; exit 0
+              }
             }
           ' playlist.m3u > target.txt || true
 
+          # 2) Soft fallback: all needles must be present on the tag line.
           if [ ! -s target.txt ]; then
-            # Soft fallback: require all needles on the metadata line
-            needles="$(echo "$NEEDLES" | tr '|' '\n')"
-            awk -v need="$NEEDLES" '
+            awk -v NEEDLES="$NEEDLES" '
               BEGIN{f=0}
               {
-                l=tolower($0)
-                if ($0 ~ /^#/) {
+                L=$0
+                if (L ~ /^#/) {
                   ok=1
-                  n=split(need, arr, /\|/)
-                  for (i=1;i<=n;i++){ if (index(l, tolower(arr[i]))==0) ok=0 }
-                  if (ok==1){ f=1; next }
+                  n=split(NEEDLES, arr, /\|/)
+                  lo=tolower(L)
+                  for (i=1;i<=n;i++) if (index(lo, tolower(arr[i]))==0) ok=0
+                  if (ok==1) { f=1; next }
                 }
-                if (f==1 && $0 !~ /^#/ && $0 ~ /^https?:\/\//) {print $0; exit 0}
-              }' playlist.m3u > target.txt || true
+                if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) { print L; exit 0 }
+              }
+            ' playlist.m3u > target.txt || true
           fi
 
           if [ ! -s target.txt ]; then
-            echo "No target found"; exit 1
+            echo "No target .m3u8 found in playlist."
+            echo "::error::No target .m3u8 found in playlist."
+            exit 1
           fi
 
-          echo "m3u8=$(cat target.txt)" >> $GITHUB_OUTPUT
+          echo "m3u8=$(cat target.txt)" >> "$GITHUB_OUTPUT"
+          echo "Found target: $(cat target.txt)"
 
-      - name: Update Bulk Redirect list (replace single item)
+      - name: Update Bulk URL Redirect list (replace single item) — DEBUG
         env:
-          TARGET_URL: ${{ steps.parse.outputs.m3u8 }}
+          CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}
+          TARGET_URL:    ${{ steps.parse.outputs.m3u8 }}
+          SOURCE_URL:    ${{ env.SOURCE_URL }}
         run: |
-          cat > payload.json <<EOF
+          set -euo pipefail
+
+          # Build payload as per Cloudflare Bulk Redirect list item schema.
+          # (Uses "redirect" object with source_url / target_url / status_code etc.)
+          cat > payload.json <<'EOF'
           [
             {
-              "source_url": "${SOURCE_URL}",
-              "target_url": "${TARGET_URL}",
-              "status": 302,
-              "include_subdomains": false,
-              "preserve_query_string": true,
-              "subpath_matching": false
+              "redirect": {
+                "source_url": "__SOURCE__",
+                "target_url": "__TARGET__",
+                "status_code": 302,
+                "preserve_query_string": true,
+                "include_subdomains": false,
+                "subpath_matching": false,
+                "preserve_path_suffix": true
+              }
             }
           ]
           EOF
+          sed -i "s|__SOURCE__|${SOURCE_URL}|g" payload.json
+          sed -i "s|__TARGET__|${TARGET_URL}|g" payload.json
 
-          curl -fsSL -X PUT \
+          echo "=== PUT replace items in list ${CF_LIST_ID} ==="
+          http_code=$(curl -sS -o resp.json -w "%{http_code}" \
+            -X PUT \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
             --data @payload.json \
-            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}/items"
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}/items")
 
-      - name: (Optional) Purge cache
+          echo "HTTP ${http_code}"
+          echo "Response JSON:"
+          cat resp.json | sed 's/\\n/\n/g' || true
+
+          # Fail the job on non-2xx so the Actions UI shows red if Cloudflare rejected it.
+          if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
+            exit 1
+          fi
+
+      # (Optional) Purge cache for your zone after updating the redirect list.
+      # Enable this step only if you really need it and have set CF_ZONE_ID secret.
+      - name: Purge cache (optional)
+        if: ${{ secrets.CF_ZONE_ID != '' }}
+        env:
+          CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
+          CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}
         run: |
-          curl -fsSL -X POST \
+          set -e
+          http_code=$(curl -sS -o purge.json -w "%{http_code}" \
+            -X POST \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
             --data '{"purge_everything":true}' \
-            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" || true
+            "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache")
+          echo "Purge HTTP ${http_code}"
+          cat purge.json || true
