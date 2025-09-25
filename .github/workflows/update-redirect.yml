@@ -9,30 +9,49 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
+    # Make secrets available as env for easy use (and for the optional purge step)
     env:
-      # === Secrets (set these in GitHub repo Settings → Secrets and variables → Actions) ===
-      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}    # Bulk URL Redirects list ID
-      CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}    # optional; only used for purge
+      # === REQUIRED: set these in GitHub repo Settings → Secrets and variables → Actions ===
+      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}   # API Token with:
+                                                   #  Account → Account Rulesets → Edit
+                                                   #  Account → Account Filter Lists → Edit
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}  # From dash URL: /<ACCOUNT_ID>/redirect-lists/<LIST_ID>
+      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}     # From dash URL: /redirect-lists/<LIST_ID>
+      # === OPTIONAL (only if you want to purge cache) ===
+      CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}
 
-      # === Edit these values for your use case ===
+      # === EDIT THESE VALUES FOR YOUR CASE ===
+      # Source playlist that rotates
       PLAYLIST_URL: "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u"
+
+      # Prefer exact title; then fallback to NEEDLES (all must match on tag line)
       WANTED_TITLE: "title=\"sonyliv-Cricket\", Pakistan vs Bangladesh - Super Four - 25 Sep 2025 [HIN] - Asia Cup 2025"
       NEEDLES: "sonyliv-Cricket|Pakistan vs Bangladesh|Super Four|25 Sep 2025|Asia Cup 2025|[HIN]"
-      # The fixed path your app already calls (must be orange-cloud proxied in Cloudflare DNS)
+
+      # Your fixed URL that users/app already call (must be orange-cloud proxied in Cloudflare DNS)
       SOURCE_URL: "https://smartrupeeguide.com/sonyliv"
 
     steps:
-      - name: Preflight — show list meta (helps debug IDs & perms)
+      - name: Preflight — verify API token (should be 200)
         run: |
           set -e
-          echo "Account: ${CF_ACCOUNT_ID}"
-          echo "List:    ${CF_LIST_ID}"
-          curl -sS -H "Authorization: Bearer ${CF_API_TOKEN}" \
-               -H "Content-Type: application/json" \
-               "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}" \
-               | sed 's/\\n/\n/g' || true
+          code=$(curl -sS -o verify.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/user/tokens/verify")
+          echo "verify HTTP $code"
+          cat verify.json
+          [ "$code" -eq 200 ] || exit 1
+
+      - name: Preflight — check list accessibility (should be 200)
+        run: |
+          set -e
+          code=$(curl -sS -o list.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}")
+          echo "list HTTP $code"
+          cat list.json
+          [ "$code" -eq 200 ] || exit 1
 
       - name: Fetch playlist
         run: |
@@ -53,7 +72,7 @@ jobs:
             }
           ' playlist.m3u > target.txt || true
 
-          # 2) Soft fallback: all needles present on the tag line
+          # 2) Soft fallback: all needles must be present on the tag line
           if [ ! -s target.txt ]; then
             awk -v NEEDLES="$NEEDLES" '
               BEGIN{f=0}
@@ -85,25 +104,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          # NOTE: status_code is required by Cloudflare (NOT "status")
-          # https://developers.cloudflare.com/rules/url-forwarding/bulk-redirects/reference/parameters/
-          cat > payload.json <<'EOF'
+          # If TARGET_URL already has '?', Cloudflare forbids preserve_query_string=true.
+          PRESERVE_QS=true
+          case "${TARGET_URL}" in
+            *\?*) PRESERVE_QS=false ;;
+          esac
+          echo "preserve_query_string => ${PRESERVE_QS}"
+
+          # Build payload per Bulk URL Redirects list item schema
+          cat > payload.json <<EOF
           [
             {
               "redirect": {
-                "source_url": "__SOURCE__",
-                "target_url": "__TARGET__",
+                "source_url": "${SOURCE_URL}",
+                "target_url": "${TARGET_URL}",
                 "status_code": 302,
-                "preserve_query_string": true,
+                "preserve_query_string": ${PRESERVE_QS},
                 "include_subdomains": false,
-                "subpath_matching": false,
-                "preserve_path_suffix": true
+                "subpath_matching": false
               }
             }
           ]
           EOF
-          sed -i "s|__SOURCE__|${SOURCE_URL}|g" payload.json
-          sed -i "s|__TARGET__|${TARGET_URL}|g" payload.json
 
           echo "=== PUT replace items in list ${CF_LIST_ID} ==="
           http_code=$(curl -sS -o resp.json -w "%{http_code}" \
@@ -116,7 +138,6 @@ jobs:
           echo "HTTP ${http_code}"
           echo "Response JSON:"
           cat resp.json | sed 's/\\n/\n/g' || true
-
           if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
             exit 1
           fi
