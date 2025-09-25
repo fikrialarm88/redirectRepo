@@ -9,27 +9,20 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
-    # -------------------------
-    # Edit these defaults
-    # -------------------------
+    # Make secrets available as env for easy `if:` checks
     env:
-      # Source playlist that rotates every ~5 min
+      # ---- IDs from repo secrets ----
+      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}
+      CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}   # optional; leave empty if you don't want purge
+
+      # ---- Edit these defaults ----
       PLAYLIST_URL: "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u"
-
-      # Exact title to prefer (hard match first)
       WANTED_TITLE: "title=\"sonyliv-Cricket\", Pakistan vs Bangladesh - Super Four - 25 Sep 2025 [HIN] - Asia Cup 2025"
-
-      # Soft fallback needles (all must be present on the tag line if exact not found)
       NEEDLES: "sonyliv-Cricket|Pakistan vs Bangladesh|Super Four|25 Sep 2025|Asia Cup 2025|[HIN]"
-
-      # TODO: replace with the fixed URL your app already hits (must be proxied via Cloudflare)
+      # TODO: replace with the fixed URL your app already hits (must be orange-cloud proxied)
       SOURCE_URL: "https://smartrupeeguide.com/sonyliv"
-
-      # ---- CF IDs are read from repo secrets ----
-      # CF_API_TOKEN   -> GitHub repo secret
-      # CF_ACCOUNT_ID  -> GitHub repo secret
-      # CF_LIST_ID     -> GitHub repo secret
-      # (Optional) CF_ZONE_ID -> GitHub repo secret (only used if you want to purge cache)
 
     steps:
       - name: Fetch playlist
@@ -47,9 +40,7 @@ jobs:
             {
               line=$0
               if (index(tolower(line), tolower(T))>0) {found=1; next}
-              if (found==1 && line !~ /^#/ && line ~ /^https?:\/\//) {
-                print line; exit 0
-              }
+              if (found==1 && line !~ /^#/ && line ~ /^https?:\/\//) { print line; exit 0 }
             }
           ' playlist.m3u > target.txt || true
 
@@ -72,7 +63,6 @@ jobs:
           fi
 
           if [ ! -s target.txt ]; then
-            echo "No target .m3u8 found in playlist."
             echo "::error::No target .m3u8 found in playlist."
             exit 1
           fi
@@ -82,27 +72,21 @@ jobs:
 
       - name: Update Bulk URL Redirect list (replace single item) — DEBUG
         env:
-          CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}
-          TARGET_URL:    ${{ steps.parse.outputs.m3u8 }}
-          SOURCE_URL:    ${{ env.SOURCE_URL }}
+          TARGET_URL: ${{ steps.parse.outputs.m3u8 }}
         run: |
           set -euo pipefail
 
-          # Build payload as per Cloudflare Bulk Redirect list item schema.
-          # (Uses "redirect" object with source_url / target_url / status_code etc.)
+          # Build payload per Cloudflare Bulk URL Redirects list item schema
           cat > payload.json <<'EOF'
           [
             {
               "redirect": {
                 "source_url": "__SOURCE__",
                 "target_url": "__TARGET__",
-                "status_code": 302,
+                "status": 302,
                 "preserve_query_string": true,
                 "include_subdomains": false,
-                "subpath_matching": false,
-                "preserve_path_suffix": true
+                "subpath_matching": false
               }
             }
           ]
@@ -128,12 +112,8 @@ jobs:
           fi
 
       # (Optional) Purge cache for your zone after updating the redirect list.
-      # Enable this step only if you really need it and have set CF_ZONE_ID secret.
       - name: Purge cache (optional)
-        if: ${{ secrets.CF_ZONE_ID != '' }}
-        env:
-          CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
-          CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}
+        if: ${{ env.CF_ZONE_ID != '' }}
         run: |
           set -e
           http_code=$(curl -sS -o purge.json -w "%{http_code}" \
