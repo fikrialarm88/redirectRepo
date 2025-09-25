@@ -9,22 +9,31 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
-    # Make secrets available as env for easy `if:` checks
     env:
-      # ---- IDs from repo secrets ----
+      # === Secrets (set these in GitHub repo Settings → Secrets and variables → Actions) ===
       CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}
-      CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}   # optional; leave empty if you don't want purge
+      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}    # Bulk URL Redirects list ID
+      CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}    # optional; only used for purge
 
-      # ---- Edit these defaults ----
+      # === Edit these values for your use case ===
       PLAYLIST_URL: "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u"
       WANTED_TITLE: "title=\"sonyliv-Cricket\", Pakistan vs Bangladesh - Super Four - 25 Sep 2025 [HIN] - Asia Cup 2025"
       NEEDLES: "sonyliv-Cricket|Pakistan vs Bangladesh|Super Four|25 Sep 2025|Asia Cup 2025|[HIN]"
-      # TODO: replace with the fixed URL your app already hits (must be orange-cloud proxied)
+      # The fixed path your app already calls (must be orange-cloud proxied in Cloudflare DNS)
       SOURCE_URL: "https://smartrupeeguide.com/sonyliv"
 
     steps:
+      - name: Preflight — show list meta (helps debug IDs & perms)
+        run: |
+          set -e
+          echo "Account: ${CF_ACCOUNT_ID}"
+          echo "List:    ${CF_LIST_ID}"
+          curl -sS -H "Authorization: Bearer ${CF_API_TOKEN}" \
+               -H "Content-Type: application/json" \
+               "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}" \
+               | sed 's/\\n/\n/g' || true
+
       - name: Fetch playlist
         run: |
           set -e
@@ -34,17 +43,17 @@ jobs:
         id: parse
         run: |
           set -e
-          # 1) Try exact title match first.
+          # 1) Prefer exact title match
           awk -v T="$WANTED_TITLE" '
-            BEGIN{found=0}
+            BEGIN{f=0}
             {
-              line=$0
-              if (index(tolower(line), tolower(T))>0) {found=1; next}
-              if (found==1 && line !~ /^#/ && line ~ /^https?:\/\//) { print line; exit 0 }
+              L=$0
+              if (index(tolower(L), tolower(T))>0) {f=1; next}
+              if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) {print L; exit 0}
             }
           ' playlist.m3u > target.txt || true
 
-          # 2) Soft fallback: all needles must be present on the tag line.
+          # 2) Soft fallback: all needles present on the tag line
           if [ ! -s target.txt ]; then
             awk -v NEEDLES="$NEEDLES" '
               BEGIN{f=0}
@@ -76,17 +85,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Build payload per Cloudflare Bulk URL Redirects list item schema
+          # NOTE: status_code is required by Cloudflare (NOT "status")
+          # https://developers.cloudflare.com/rules/url-forwarding/bulk-redirects/reference/parameters/
           cat > payload.json <<'EOF'
           [
             {
               "redirect": {
                 "source_url": "__SOURCE__",
                 "target_url": "__TARGET__",
-                "status": 302,
+                "status_code": 302,
                 "preserve_query_string": true,
                 "include_subdomains": false,
-                "subpath_matching": false
+                "subpath_matching": false,
+                "preserve_path_suffix": true
               }
             }
           ]
@@ -106,12 +117,10 @@ jobs:
           echo "Response JSON:"
           cat resp.json | sed 's/\\n/\n/g' || true
 
-          # Fail the job on non-2xx so the Actions UI shows red if Cloudflare rejected it.
           if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
             exit 1
           fi
 
-      # (Optional) Purge cache for your zone after updating the redirect list.
       - name: Purge cache (optional)
         if: ${{ env.CF_ZONE_ID != '' }}
         run: |
