@@ -25,8 +25,8 @@ jobs:
       PLAYLIST_URL: "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u"
 
       # Prefer exact title; then fallback to NEEDLES (all must match on tag line)
-      WANTED_TITLE: "title=\"sonyliv-Cricket\", Pakistan vs Bangladesh - Super Four - 25 Sep 2025 [HIN] - Asia Cup 2025"
-      NEEDLES: "sonyliv-Cricket|Pakistan vs Bangladesh|Super Four|25 Sep 2025|Asia Cup 2025|[HIN]"
+      WANTED_TITLE: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [HIN] - Asia Cup 2025"
+      NEEDLES: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[HIN]"
 
       # Your fixed URL that users/app already call (must be orange-cloud proxied in Cloudflare DNS)
       SOURCE_URL: "https://smartrupeeguide.com/sonyliv"
