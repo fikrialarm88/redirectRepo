@@ -1,156 +1,244 @@
-name: Update SonyLIV Redirect (5 min)
+name: Update SonyLIV Redirects (HIN + ENG) (5 min)
 
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: redirect-update
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
 
-    # Make secrets available as env for easy use (and for the optional purge step)
     env:
-      # === REQUIRED: set these in GitHub repo Settings → Secrets and variables → Actions ===
-      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}   # API Token with:
-                                                   #  Account → Account Rulesets → Edit
-                                                   #  Account → Account Filter Lists → Edit
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}  # From dash URL: /<ACCOUNT_ID>/redirect-lists/<LIST_ID>
-      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}     # From dash URL: /redirect-lists/<LIST_ID>
-      # === OPTIONAL (only if you want to purge cache) ===
+      # === REQUIRED: repo secrets ===
+      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}     # Token with: Account Rulesets:Edit + Account Filter Lists:Edit
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}    # From dash URL: /<ACCOUNT_ID>/redirect-lists/<LIST_ID>
+      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}       # From dash URL: /redirect-lists/<LIST_ID>
+      # === OPTIONAL (only if you want purge) ===
       CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}
 
-      # === EDIT THESE VALUES FOR YOUR CASE ===
-      # Source playlist that rotates
+      # === SOURCE PLAYLIST ===
       PLAYLIST_URL: "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u"
 
-      # Prefer exact title; then fallback to NEEDLES (all must match on tag line)
-      WANTED_TITLE: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [HIN] - Asia Cup 2025"
-      NEEDLES: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[HIN]"
+      # === HINDI MATCH (edit if the event changes) ===
+      WANTED_TITLE_HIN: "title=\"sonyliv-Cricket\", India vs Pakistan - Final [HIN] - Asia Cup 2025"
+      NEEDLES_HIN: "[HIN]"
+      SOURCE_URL_HIN: "https://smartrupeeguide.com/sonyliv"        # existing path you already use
 
-      # Your fixed URL that users/app already call (must be orange-cloud proxied in Cloudflare DNS)
-      SOURCE_URL: "https://smartrupeeguide.com/sonyliv"
+      # === ENGLISH MATCH (add/change to your ENG event) ===
+      WANTED_TITLE_ENG: "title=\"sonyliv-Cricket\", India vs Pakistan - Final [ENG] - Asia Cup 2025"
+      NEEDLES_ENG: "[ENG]"
+      SOURCE_URL_ENG: "https://smartrupeeguide.com/sonyliv-eng"    # choose your ENG path
 
     steps:
-      - name: Preflight — verify API token (should be 200)
+      - name: Install jq (for JSON parsing)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Verify API token
         run: |
           set -e
           code=$(curl -sS -o verify.json -w "%{http_code}" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             "https://api.cloudflare.com/client/v4/user/tokens/verify")
-          echo "verify HTTP $code"
-          cat verify.json
+          echo "verify HTTP $code"; cat verify.json
           [ "$code" -eq 200 ] || exit 1
 
-      - name: Preflight — check list accessibility (should be 200)
+      - name: Check list accessibility
         run: |
           set -e
           code=$(curl -sS -o list.json -w "%{http_code}" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
             "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}")
-          echo "list HTTP $code"
-          cat list.json
+          echo "list HTTP $code"; cat list.json
           [ "$code" -eq 200 ] || exit 1
+
+      - name: Fetch current list items (to preserve if not found this run)
+        run: |
+          set -e
+          curl -sS \
+            -H "Authorization: Bearer ${CF_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}/items?page=1&per_page=1000" \
+            -o items.json
+          echo "Existing items:"; cat items.json
 
       - name: Fetch playlist
         run: |
           set -e
           curl -fsSL "$PLAYLIST_URL" -o playlist.m3u
 
-      - name: Extract target .m3u8
-        id: parse
+      - name: Extract HIN .m3u8
+        id: parse_hin
         run: |
           set -e
-          # 1) Prefer exact title match
-          awk -v T="$WANTED_TITLE" '
+          # Try exact title first
+          awk -v T="$WANTED_TITLE_HIN" '
             BEGIN{f=0}
-            {
-              L=$0
+            { L=$0
               if (index(tolower(L), tolower(T))>0) {f=1; next}
               if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) {print L; exit 0}
             }
-          ' playlist.m3u > target.txt || true
+          ' playlist.m3u > hin.txt || true
 
-          # 2) Soft fallback: all needles must be present on the tag line
-          if [ ! -s target.txt ]; then
-            awk -v NEEDLES="$NEEDLES" '
+          # Fallback: all needles must be present
+          if [ ! -s hin.txt ]; then
+            awk -v NEEDLES="$NEEDLES_HIN" '
               BEGIN{f=0}
-              {
-                L=$0
+              { L=$0
                 if (L ~ /^#/) {
-                  ok=1
-                  n=split(NEEDLES, arr, /\|/)
-                  lo=tolower(L)
+                  ok=1; n=split(NEEDLES, arr, /\|/); lo=tolower(L)
                   for (i=1;i<=n;i++) if (index(lo, tolower(arr[i]))==0) ok=0
                   if (ok==1) { f=1; next }
                 }
                 if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) { print L; exit 0 }
               }
-            ' playlist.m3u > target.txt || true
+            ' playlist.m3u > hin.txt || true
           fi
 
-          if [ ! -s target.txt ]; then
-            echo "::error::No target .m3u8 found in playlist."
+          if [ -s hin.txt ]; then
+            echo "m3u8_hin=$(cat hin.txt)" >> "$GITHUB_OUTPUT"
+            echo "HIN target: $(cat hin.txt)"
+          else
+            echo "HIN not found; will try to preserve previous."
+          fi
+
+      - name: Extract ENG .m3u8
+        id: parse_eng
+        run: |
+          set -e
+          # Try exact title first
+          awk -v T="$WANTED_TITLE_ENG" '
+            BEGIN{f=0}
+            { L=$0
+              if (index(tolower(L), tolower(T))>0) {f=1; next}
+              if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) {print L; exit 0}
+            }
+          ' playlist.m3u > eng.txt || true
+
+          # Fallback: all needles must be present
+          if [ ! -s eng.txt ]; then
+            awk -v NEEDLES="$NEEDLES_ENG" '
+              BEGIN{f=0}
+              { L=$0
+                if (L ~ /^#/) {
+                  ok=1; n=split(NEEDLES, arr, /\|/); lo=tolower(L)
+                  for (i=1;i<=n;i++) if (index(lo, tolower(arr[i]))==0) ok=0
+                  if (ok==1) { f=1; next }
+                }
+                if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) { print L; exit 0 }
+              }
+            ' playlist.m3u > eng.txt || true
+          fi
+
+          if [ -s eng.txt ]; then
+            echo "m3u8_eng=$(cat eng.txt)" >> "$GITHUB_OUTPUT"
+            echo "ENG target: $(cat eng.txt)"
+          else
+            echo "ENG not found; will try to preserve previous."
+          fi
+
+      - name: Compose payload (preserve previous if one missing)
+        id: compose
+        run: |
+          set -e
+          SRC_H="${SOURCE_URL_HIN}"
+          SRC_E="${SOURCE_URL_ENG}"
+
+          # New targets (may be empty)
+          NEW_H="${{ steps.parse_hin.outputs.m3u8_hin || '' }}"
+          NEW_E="${{ steps.parse_eng.outputs.m3u8_eng || '' }}"
+
+          # Previous targets from list (if present)
+          PREV_H=$(jq -r --arg src "$SRC_H" '.result[]? | select(.redirect?.source_url==$src) | .redirect.target_url' items.json | head -n1)
+          PREV_E=$(jq -r --arg src "$SRC_E" '.result[]? | select(.redirect?.source_url==$src) | .redirect.target_url' items.json | head -n1)
+
+          # Choose final targets, preferring NEW_* then falling back to PREV_*
+          TGT_H="${NEW_H:-$PREV_H}"
+          TGT_E="${NEW_E:-$PREV_E}"
+
+          echo "Final HIN target: $TGT_H"
+          echo "Final ENG target: $TGT_E"
+
+          # Fail only if both are missing (nothing to update)
+          if [ -z "$TGT_H" ] && [ -z "$TGT_E" ]; then
+            echo "::error::Neither HIN nor ENG target available."
             exit 1
           fi
 
-          echo "m3u8=$(cat target.txt)" >> "$GITHUB_OUTPUT"
-          echo "Found target: $(cat target.txt)"
+          # Decide preserve_query_string flags per target
+          P_QS_H=true; [[ "$TGT_H" == *"?"* ]] && P_QS_H=false
+          P_QS_E=true; [[ "$TGT_E" == *"?"* ]] && P_QS_E=false
 
-      - name: Update Bulk URL Redirect list (replace single item) — DEBUG
-        env:
-          TARGET_URL: ${{ steps.parse.outputs.m3u8 }}
-        run: |
-          set -euo pipefail
+          # Build payload with whichever entries we have
+          echo "[" > payload.json
+          FIRST=1
 
-          # If TARGET_URL already has '?', Cloudflare forbids preserve_query_string=true.
-          PRESERVE_QS=true
-          case "${TARGET_URL}" in
-            *\?*) PRESERVE_QS=false ;;
-          esac
-          echo "preserve_query_string => ${PRESERVE_QS}"
-
-          # Build payload per Bulk URL Redirects list item schema
-          cat > payload.json <<EOF
-          [
+          if [ -n "$TGT_H" ]; then
+            if [ $FIRST -eq 0 ]; then echo "," >> payload.json; fi
+            cat >> payload.json <<EOF
             {
               "redirect": {
-                "source_url": "${SOURCE_URL}",
-                "target_url": "${TARGET_URL}",
+                "source_url": "$SRC_H",
+                "target_url": "$TGT_H",
                 "status_code": 302,
-                "preserve_query_string": ${PRESERVE_QS},
+                "preserve_query_string": $P_QS_H,
                 "include_subdomains": false,
                 "subpath_matching": false
               }
             }
-          ]
-          EOF
+EOF
+            FIRST=0
+          fi
 
-          echo "=== PUT replace items in list ${CF_LIST_ID} ==="
-          http_code=$(curl -sS -o resp.json -w "%{http_code}" \
+          if [ -n "$TGT_E" ]; then
+            if [ $FIRST -eq 0 ]; then echo "," >> payload.json; fi
+            cat >> payload.json <<EOF
+            {
+              "redirect": {
+                "source_url": "$SRC_E",
+                "target_url": "$TGT_E",
+                "status_code": 302,
+                "preserve_query_string": $P_QS_E,
+                "include_subdomains": false,
+                "subpath_matching": false
+              }
+            }
+EOF
+            FIRST=0
+          fi
+
+          echo "]" >> payload.json
+
+          echo "Payload:"
+          cat payload.json
+
+      - name: PUT list items (replace with HIN+ENG)
+        run: |
+          set -e
+          code=$(curl -sS -o resp.json -w "%{http_code}" \
             -X PUT \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
             --data @payload.json \
             "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/rules/lists/${CF_LIST_ID}/items")
-
-          echo "HTTP ${http_code}"
-          echo "Response JSON:"
-          cat resp.json | sed 's/\\n/\n/g' || true
-          if [ "${http_code}" -lt 200 ] || [ "${http_code}" -ge 300 ]; then
-            exit 1
-          fi
+          echo "PUT HTTP $code"; cat resp.json | sed 's/\\n/\n/g' || true
+          [ "$code" -ge 200 ] && [ "$code" -lt 300 ]
 
       - name: Purge cache (optional)
         if: ${{ env.CF_ZONE_ID != '' }}
         run: |
           set -e
-          http_code=$(curl -sS -o purge.json -w "%{http_code}" \
+          code=$(curl -sS -o purge.json -w "%{http_code}" \
             -X POST \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
             -H "Content-Type: application/json" \
             --data '{"purge_everything":true}' \
             "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache")
-          echo "Purge HTTP ${http_code}"
-          cat purge.json || true
+          echo "Purge HTTP $code"; cat purge.json || true
