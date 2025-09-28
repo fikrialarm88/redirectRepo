@@ -27,15 +27,15 @@ jobs:
       # === HINDI MATCH (edit as needed) ===
       WANTED_TITLE_HIN: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [HIN] - Asia Cup 2025"
       NEEDLES_HIN: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[HIN]"
-      SOURCE_URL_HIN: "https://smartrupeeguide.com/sonyliv"        # existing path you already use
+      SOURCE_URL_HIN: "https://smartrupeeguide.com/sonyliv"        # existing HIN path
 
       # === ENGLISH MATCH (edit as needed) ===
       WANTED_TITLE_ENG: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [ENG] - Asia Cup 2025"
       NEEDLES_ENG: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[ENG]"
-      SOURCE_URL_ENG: "https://smartrupeeguide.com/sonyliv-eng"    # your ENG path
+      SOURCE_URL_ENG: "https://smartrupeeguide.com/sonyliv-eng"    # ENG path
 
     steps:
-      - name: Install jq (for JSON parsing)
+      - name: Install jq (for JSON)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
@@ -59,7 +59,7 @@ jobs:
           echo "list HTTP $code"; cat list.json
           [ "$code" -eq 200 ] || exit 1
 
-      - name: Fetch current list items (to preserve if not found this run)
+      - name: Fetch existing list items (preserve if one missing)
         run: |
           set -e
           curl -sS \
@@ -78,7 +78,6 @@ jobs:
         id: parse_hin
         run: |
           set -e
-          # Prefer exact title first
           awk -v T="$WANTED_TITLE_HIN" '
             BEGIN{f=0}
             { L=$0
@@ -86,8 +85,6 @@ jobs:
               if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) {print L; exit 0}
             }
           ' playlist.m3u > hin.txt || true
-
-          # Fallback: all needles must be present
           if [ ! -s hin.txt ]; then
             awk -v NEEDLES="$NEEDLES_HIN" '
               BEGIN{f=0}
@@ -101,7 +98,6 @@ jobs:
               }
             ' playlist.m3u > hin.txt || true
           fi
-
           if [ -s hin.txt ]; then
             echo "m3u8_hin=$(cat hin.txt)" >> "$GITHUB_OUTPUT"
             echo "HIN target: $(cat hin.txt)"
@@ -113,7 +109,6 @@ jobs:
         id: parse_eng
         run: |
           set -e
-          # Prefer exact title first
           awk -v T="$WANTED_TITLE_ENG" '
             BEGIN{f=0}
             { L=$0
@@ -121,8 +116,6 @@ jobs:
               if (f==1 && L !~ /^#/ && L ~ /^https?:\/\//) {print L; exit 0}
             }
           ' playlist.m3u > eng.txt || true
-
-          # Fallback: all needles must be present
           if [ ! -s eng.txt ]; then
             awk -v NEEDLES="$NEEDLES_ENG" '
               BEGIN{f=0}
@@ -136,7 +129,6 @@ jobs:
               }
             ' playlist.m3u > eng.txt || true
           fi
-
           if [ -s eng.txt ]; then
             echo "m3u8_eng=$(cat eng.txt)" >> "$GITHUB_OUTPUT"
             echo "ENG target: $(cat eng.txt)"
@@ -144,77 +136,49 @@ jobs:
             echo "ENG not found; will try to preserve previous."
           fi
 
-      - name: Compose payload (preserve previous if one missing)
+      - name: Compose payload (no heredocs)
         id: compose
         run: |
           set -e
           SRC_H="${SOURCE_URL_HIN}"
           SRC_E="${SOURCE_URL_ENG}"
 
-          # New targets from previous steps (may be empty)
           NEW_H="${{ steps.parse_hin.outputs.m3u8_hin }}"
           NEW_E="${{ steps.parse_eng.outputs.m3u8_eng }}"
 
-          # Previous targets from the list (if present)
           PREV_H=$(jq -r --arg src "$SRC_H" '.result[]? | select(.redirect?.source_url==$src) | .redirect.target_url' items.json | head -n1)
           PREV_E=$(jq -r --arg src "$SRC_E" '.result[]? | select(.redirect?.source_url==$src) | .redirect.target_url' items.json | head -n1)
 
-          # Choose final targets, preferring new ones
           TGT_H="$NEW_H"; [ -z "$TGT_H" ] && TGT_H="$PREV_H"
           TGT_E="$NEW_E"; [ -z "$TGT_E" ] && TGT_E="$PREV_E"
 
           echo "Final HIN target: $TGT_H"
           echo "Final ENG target: $TGT_E"
 
-          # Fail only if both are missing
           if [ -z "$TGT_H" ] && [ -z "$TGT_E" ]; then
             echo "::error::Neither HIN nor ENG target available."
             exit 1
           fi
 
-          # Decide preserve_query_string flags per target
           P_QS_H=true; [[ "$TGT_H" == *"?"* ]] && P_QS_H=false
           P_QS_E=true; [[ "$TGT_E" == *"?"* ]] && P_QS_E=false
 
-          # Build payload with whichever entries we have
-          echo "[" > payload.json
-          FIRST=1
+          jq -n \
+            --arg src_h "$SRC_H" --arg tgt_h "$TGT_H" \
+            --arg src_e "$SRC_E" --arg tgt_e "$TGT_E" \
+            --argjson pqs_h $([ "$P_QS_H" = true ] && echo true || echo false) \
+            --argjson pqs_e $([ "$P_QS_E" = true ] && echo true || echo false) \
+            '[
+               (if $tgt_h != "" then {redirect:{
+                   source_url:$src_h, target_url:$tgt_h, status_code:302,
+                   preserve_query_string:$pqs_h, include_subdomains:false, subpath_matching:false
+               }} else empty end),
+               (if $tgt_e != "" then {redirect:{
+                   source_url:$src_e, target_url:$tgt_e, status_code:302,
+                   preserve_query_string:$pqs_e, include_subdomains:false, subpath_matching:false
+               }} else empty end)
+             ]' > payload.json
 
-          if [ -n "$TGT_H" ]; then
-            if [ $FIRST -eq 0 ]; then echo "," >> payload.json; fi
-            cat >> payload.json <<EOF
-            {
-              "redirect": {
-                "source_url": "$SRC_H",
-                "target_url": "$TGT_H",
-                "status_code": 302,
-                "preserve_query_string": $P_QS_H,
-                "include_subdomains": false,
-                "subpath_matching": false
-              }
-            }
-EOF
-            FIRST=0
-          fi
-
-          if [ -n "$TGT_E" ]; then
-            if [ $FIRST -eq 0 ]; then echo "," >> payload.json; fi
-            cat >> payload.json <<EOF
-            {
-              "redirect": {
-                "source_url": "$SRC_E",
-                "target_url": "$TGT_E",
-                "status_code": 302,
-                "preserve_query_string": $P_QS_E,
-                "include_subdomains": false,
-                "subpath_matching": false
-              }
-            }
-EOF
-            FIRST=0
-          fi
-
-          echo "]" >> payload.json
           echo "Payload:"; cat payload.json
 
       - name: PUT list items (replace with HIN+ENG)
