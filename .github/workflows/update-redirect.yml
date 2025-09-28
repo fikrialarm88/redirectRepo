@@ -26,12 +26,12 @@ jobs:
 
       # === HINDI MATCH (edit as needed) ===
       WANTED_TITLE_HIN: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [HIN] - Asia Cup 2025"
-      NEEDLES_HIN: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[HIN]"
+      NEEDLES_HIN: "[HIN]"
       SOURCE_URL_HIN: "https://smartrupeeguide.com/sonyliv"        # existing HIN path
 
       # === ENGLISH MATCH (edit as needed) ===
       WANTED_TITLE_ENG: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [ENG] - Asia Cup 2025"
-      NEEDLES_ENG: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[ENG]"
+      NEEDLES_ENG: "[ENG]"
       SOURCE_URL_ENG: "https://smartrupeeguide.com/sonyliv-eng"    # ENG path
 
     steps:
