@@ -15,24 +15,24 @@ jobs:
 
     env:
       # === REQUIRED: repo secrets ===
-      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}     # Token with: Account Rulesets:Edit + Account Filter Lists:Edit
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}    # From dash URL: /<ACCOUNT_ID>/redirect-lists/<LIST_ID>
-      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}       # From dash URL: /redirect-lists/<LIST_ID>
+      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}      # Token with: Account Rulesets:Edit + Account Filter Lists:Edit
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}     # From dash URL: /<ACCOUNT_ID>/redirect-lists/<LIST_ID>
+      CF_LIST_ID:    ${{ secrets.CF_LIST_ID }}        # From dash URL: /redirect-lists/<LIST_ID>
       # === OPTIONAL (only if you want purge) ===
       CF_ZONE_ID:    ${{ secrets.CF_ZONE_ID }}
 
       # === SOURCE PLAYLIST ===
       PLAYLIST_URL: "https://raw.githubusercontent.com/drmlive/sliv-live-events/refs/heads/main/sonyliv.m3u"
 
-      # === HINDI MATCH (edit if the event changes) ===
-      WANTED_TITLE_HIN: "title=\"sonyliv-Cricket\", India vs Pakistan - Final [HIN] - Asia Cup 2025"
-      NEEDLES_HIN: "[HIN]"
+      # === HINDI MATCH (edit as needed) ===
+      WANTED_TITLE_HIN: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [HIN] - Asia Cup 2025"
+      NEEDLES_HIN: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[HIN]"
       SOURCE_URL_HIN: "https://smartrupeeguide.com/sonyliv"        # existing path you already use
 
-      # === ENGLISH MATCH (add/change to your ENG event) ===
-      WANTED_TITLE_ENG: "title=\"sonyliv-Cricket\", India vs Pakistan - Final [ENG] - Asia Cup 2025"
-      NEEDLES_ENG: "[ENG]"
-      SOURCE_URL_ENG: "https://smartrupeeguide.com/sonyliv-eng"    # choose your ENG path
+      # === ENGLISH MATCH (edit as needed) ===
+      WANTED_TITLE_ENG: "title=\"sonyliv-Cricket\", India vs Sri Lanka - Super Four - 26 Sep 2025 [ENG] - Asia Cup 2025"
+      NEEDLES_ENG: "sonyliv-Cricket|India vs Sri Lanka|Super Four|26 Sep 2025|Asia Cup 2025|[ENG]"
+      SOURCE_URL_ENG: "https://smartrupeeguide.com/sonyliv-eng"    # your ENG path
 
     steps:
       - name: Install jq (for JSON parsing)
@@ -78,7 +78,7 @@ jobs:
         id: parse_hin
         run: |
           set -e
-          # Try exact title first
+          # Prefer exact title first
           awk -v T="$WANTED_TITLE_HIN" '
             BEGIN{f=0}
             { L=$0
@@ -113,7 +113,7 @@ jobs:
         id: parse_eng
         run: |
           set -e
-          # Try exact title first
+          # Prefer exact title first
           awk -v T="$WANTED_TITLE_ENG" '
             BEGIN{f=0}
             { L=$0
@@ -151,22 +151,22 @@ jobs:
           SRC_H="${SOURCE_URL_HIN}"
           SRC_E="${SOURCE_URL_ENG}"
 
-          # New targets (may be empty)
-          NEW_H="${{ steps.parse_hin.outputs.m3u8_hin || '' }}"
-          NEW_E="${{ steps.parse_eng.outputs.m3u8_eng || '' }}"
+          # New targets from previous steps (may be empty)
+          NEW_H="${{ steps.parse_hin.outputs.m3u8_hin }}"
+          NEW_E="${{ steps.parse_eng.outputs.m3u8_eng }}"
 
-          # Previous targets from list (if present)
+          # Previous targets from the list (if present)
           PREV_H=$(jq -r --arg src "$SRC_H" '.result[]? | select(.redirect?.source_url==$src) | .redirect.target_url' items.json | head -n1)
           PREV_E=$(jq -r --arg src "$SRC_E" '.result[]? | select(.redirect?.source_url==$src) | .redirect.target_url' items.json | head -n1)
 
-          # Choose final targets, preferring NEW_* then falling back to PREV_*
-          TGT_H="${NEW_H:-$PREV_H}"
-          TGT_E="${NEW_E:-$PREV_E}"
+          # Choose final targets, preferring new ones
+          TGT_H="$NEW_H"; [ -z "$TGT_H" ] && TGT_H="$PREV_H"
+          TGT_E="$NEW_E"; [ -z "$TGT_E" ] && TGT_E="$PREV_E"
 
           echo "Final HIN target: $TGT_H"
           echo "Final ENG target: $TGT_E"
 
-          # Fail only if both are missing (nothing to update)
+          # Fail only if both are missing
           if [ -z "$TGT_H" ] && [ -z "$TGT_E" ]; then
             echo "::error::Neither HIN nor ENG target available."
             exit 1
@@ -215,9 +215,7 @@ EOF
           fi
 
           echo "]" >> payload.json
-
-          echo "Payload:"
-          cat payload.json
+          echo "Payload:"; cat payload.json
 
       - name: PUT list items (replace with HIN+ENG)
         run: |
